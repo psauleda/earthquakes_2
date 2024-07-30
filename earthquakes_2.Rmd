@@ -1,0 +1,807 @@
+---
+title: 'Mineria de dades: Earthquakes Part 2'
+output:
+  html_document:
+    highlight: default
+    number_sections: yes
+    theme: cosmo
+    toc: yes
+    toc_depth: 2
+---
+
+*************
+# Introducció
+*************
+
+Com a continuació de l'estudi iniciat a la Part 1, procedim a **aplicar models analítics, tant no supervisats com supervisats**, sobre el joc de dades seleccionat i preparat. En aquesta **Part 2** partim de les dades prèviament preparades a la **Part 1**.
+
+**Models no supervisats**
+
+1. Aplicar un model **no supervisat** basat en el concepte de distància, sobre el joc de dades.
+
+2. Aplicar de nou el model anterior, però usant una **mètrica de distància diferent** i comparar-ne els resultats amb els mètodes anteriors.
+
+3. Utilitzar els algorismes **DBSCAN i OPTICS**, provant amb diferents valors del paràmetre `eps` i `minPts`, i es comparen els resultats amb els mètodes anteriors.
+
+**Models supervisats**
+
+4. Seleccionar una mostra d'entrenament i una de test utilitzant les proporcions que es considerin més adequades en funció de la disponibilitat de dades. Justificar aquesta selecció.
+
+5. Aplicar un model de generació de regles a partir d' **arbres de decisió** ajustant les diferents opcions de creació. Obtenir l'arbre sense i amb opcions de poda. Obtenir la matriu de confusió. Finalment, comparar-ne els resultats.
+
+6. Aplicar un **model supervisat** diferent del del punt 5., s'ha de triar entre els que s'han vist al material docent de l'assignatura. Comparar el resultat amb el model generat anteriorment.
+
+7. Identificar eventuals **limitacions** del dataset seleccionat i **analitzar els riscos** per al cas d'ús del model per a classificar una nova dada.
+
+## Conjunt de dades
+
+Abans de començar amb els exercicis, recordem quines són les nostres dades i en quin estat les tenim.  
+
+El nostre joc de dades procedeix de [Kaggle](https://www.kaggle.com/), en particular:  
+
+  - https://www.kaggle.com/datasets/mohitkr05/global-significant-earthquake-database-from-2150bc  
+
+*Global Significant Earthquake Database from 2150BC*, és un llistat d'uns 6000 terratrèmols que van del 2150 BC fins a l'actualitat. Ja vam veure que aquest conjunt de dades és altament incomplet. Un cop hem netejat els valors NA's tenim:
+```{r message=FALSE}
+library(tidyverse)
+
+dades <- read_csv('Worldwide-Earthquake-database.csv')
+```
+
+```{r}
+# Fem la neteja de la pràctica 1
+dades <- dades |> 
+  select(1:31)
+
+# Considerem terratrèmols del 1900 endavant
+dades_1900 <- dades |> 
+  filter(YEAR >= 1900)
+
+# Eliminem NA's de la profunditat i magnitud
+# Per Pra2 no eliminem valors NA's de hora i morts, com vam fer a la Pra1
+dades_netes <- dades_1900 |>
+  filter(!is.na(FOCAL_DEPTH) & !is.na(EQ_PRIMARY)  & !is.na(DAMAGE_DESCRIPTION) & !is.na(DEATHS))
+
+# Convertim Yes = 1, No = 0
+dades_netes <- dades_netes |> 
+  mutate(FLAG_TSUNAMI = ifelse(FLAG_TSUNAMI %in% c("No"), 0, 1))
+```
+
+Per tant, de moment ens quedem amb:
+```{r}
+# variables amb les que ens quedem (2 = FLAG_TSUNAMI, 18 = COUNTRY, no la posem, so far)
+# cols <- c(2, 3, 9, 10, 18, 21, 22, 24, 25, 31)
+# dades_countries <- as.data.frame(dades_netes[cols])
+cols <- c(2, 3, 9, 10, 21, 22, 24, 25, 31)
+dades <- as.data.frame(dades_netes[cols])
+```
+
+
+```{r}
+library(skimr)
+
+skim_without_charts(dades)
+```
+
+## Plantejament
+
+Sense perdre de vista els exemples i guies que s'han anat presentant en aquest curs, (penguins o Hawks pel cas de models no supervisats i Titanic pel cas de models supervisats), ara ens trobem amb un conjunt de dades, els terratrèmols o activitat sísmica, amb les quals hem de fer un estudi semblant.  
+
+El primer que hem de plantejar és un model no supervisat. Mirant el conjunt de dades, les característiques principals que descriuen els terratrèmols són, la **magnitud** i la **profunditat**. No podem fer servir la intensitat ja que això requereix una neteja més exhaustiva que ens portaria a un nou conjunt de dades molt pobre.  
+
+El fet que hi hagi tsunami o no, és una variable que depèn més aviat de la situació geogràfica, és a dir, si hi ha aigua a les proximitats del terratrèmol.  
+
+Podríem fer servir les variables que descriuen la mortalitat i els danys materials, (tot i que com vam veure a la pràctica 1, depenen d'altres factors, com ara densitat de població, tipus o riquesa del país).  
+
+Podem plantejar el problema primer buscant clústers amb un model no supervisat, per tal de categoritzar els terratrèmols i a partir d'aquí, fer servir aquesta categorització com a variable objectiu i aplicar un mètode supervisat.  
+Alternativament podem buscar primer alguna agrupació i després escollir una variable objectiu d'entre les que decidim. De fet, seguirem aquesta darrera opció.
+
+Una primera idea pot ser una classificació dels terratrèmols segons la seva magnitud o la seva profunditat. (Podem discretitzar aquestes variables i mirar si obtenim clústers semblants, tot i que aquesta discretització és més aviat subjectiva i no té perquè coincidir). Una altra possibilitat és escollir com a variable objectiu els danys personals per tal de predir quins terratrèmols causaran aquestes morts.
+
+
+*************
+# Exercici 1
+*************
+
+## Generació d'un model no supervisat.
+
+Les nostres dades són:
+```{r}
+str(dades)
+```
+
+És a dir, tenim 1137 observacions i  9 variables.
+
+Primer de tot normalitzem les dades per tal d'evitar biaixos degut a les diferents escale i unitats amb les que traballarem:
+```{r}
+# Definim la funció de normalització
+ nor <- function(x) {(x -min(x))/(max(x)-min(x))}
+
+# Guardem un nou dataset normalitzat
+dades <- as.data.frame(lapply(dades, nor))
+```
+
+## Comprovació de l'existència de clústers
+
+Abans de buscar el possible nombre de clusters, podem comprovar si el nostre dataset és apte a tenir clústers.  
+(Refs. *Assessing Clustering Tendency*:  
+
+  * https://www.datanovia.com/en/lessons/assessing-clustering-tendency/  
+  * https://www.r-bloggers.com/2016/10/assessing-clustering-tendency-a-vital-issue-unsupervised-machine-learning/).  
+
+Hi ha varies maneres de comprovar-ho. Farem servir el mètode estadístic, l'*estadística de Hopkins*, que ens dona un valor H que és un indicatiu de l'existència de clústers.
+
+En el nostre cas fem servir la llibreria ` factorextra`:
+```{r cache=TRUE}
+library(factoextra)
+# Compute Hopkins statistic
+res <- get_clust_tendency(dades, n = nrow(dades) - 1, graph = FALSE)
+res$hopkins_stat
+```
+
+Un valor de *H* proper a 1 ens diu que tenim opcions reals d'obtenir clústers, en el nostre cas tenim *H = 0.876*, per tant podem seguir i esbrinar quants clústers trobem.
+
+## Cerca del nombre de clústers
+
+Desconeixem el nombre de clústers, per tant intentem esbrinar-ho. Comencem amb el mètode del colze, basat en la suma dels quadrats de les distàncies dels punts de cada grup respecte al seu centre (withinss), amb la major separació entre centres de grups (betweenss).
+```{r warning=FALSE}
+library(cluster)
+
+dissim <- daisy(dades)
+resultats_ssw <- rep(0, 10)
+resultats_silhouette <- rep(0, 10)
+
+for (i in c(2, 3, 4, 5, 6, 7, 8, 9, 10)) {
+  set.seed(123)
+  fit <- kmeans(dades, i)
+  y_cluster <- fit$cluster
+  resultats_ssw[i] <- fit$tot.withinss
+  sk <- silhouette(y_cluster, dissim)
+  # sk[,1] eś el cluster, sk[,2] és el cluster veí, sk[,3] és l'amplada de la silueta
+  resultats_silhouette[i] <- mean(sk[, 3])
+}
+
+plot(2:10, resultats_ssw[2:10], type = "o", col = "blue", pch = 0, xlab = "Nombre de clústers", ylab = "Suma de quadrats")
+```
+
+Observem que per `k = 3` la corba es comença a doblegar, (tot i que també podem contemplar `k = 2` i `k = 4`).
+
+Considerem ara el mètode de la silueta que mesura la semblança dels punts d’un clúster respecte a clústers propers. Visualitzem la silueta mitja.
+```{r}
+plot(2:10, resultats_silhouette[2:10], type = "o", col = "blue", pch = 0, xlab = "Nombre de clústers", ylab = "Silueta")
+```
+
+Aquesta gràfica no ens diu massa, el que sí veiem que el valor de la silueta és inferior a 0.5.
+
+També es pot fer servir la funció `kmeansruns()` del paquet fpc que executarà l’algorisme kmeans com un conjunt de valors i seleccionarà el valor del número de clústers que millor funcioni d’acord amb dos criteris: la silueta mitja (asw) i Calinski-Harabasz (“ch”).
+
+```{r}
+library('fpc')
+fit_ch  <- kmeansruns(dades, krange = 1:10, criterion = "ch") 
+fit_asw <- kmeansruns(dades, krange = 1:10, criterion = "asw") 
+```
+
+Podem comprovar el valor amb el que s’ha obtingut el millor resultat i també mostrar el resultat obtingut per a tots els valors de `k` fent servir tots dos criteris.
+```{r}
+fit_ch$bestk
+fit_asw$bestk
+```
+
+Si ho visualitzem:
+```{r}
+plot(1:10, fit_asw$crit, type = "o", col = "blue", pch = 0, xlab = "Número de clústers",ylab = "Criteri silueta mitja")
+```
+
+Amb el criteri de la silueta mitja obtenim `k = 2` però segons la gràfica `k = 3` és proper. 
+
+```{r}
+plot(1:10, fit_ch$crit,type = "o", col = "blue", pch = 0, xlab = "Número de clústers", ylab = "Criteri Calinski-Harabasz")
+```
+
+Amb el criteri de Calinski-Harabasz ens dona un valor de 3, però s'observa que per `k = 4` també podria ser un valor acceptable
+
+Com a resum podem dir que triar el nombre de clústers no és senzill i menys en el nostre cas que anem una mica *a les fosques*, no obtenim un valor concret i s’ha de confrontar amb diferents mètodes. En el nostre cas no perdrem de vista aquest valor de `k = 3` que hem obtingut amb el mètode les colze i amb el criteri de Calinski-Harabasz.
+
+## Aplicació de l’algoritme k-means
+
+Tot seguit volem veure com es comporta kmeans. Dels apartats anteriors hem trobat que el nombre de clústers candidats poden ser valors de `k` que van de 2 a 4.
+
+Podem visualitzar inicialment 2, 3, 4 i 5 clústers representant les morts vs la magnitud dels terratrèmols:
+```{r}
+set.seed(1)
+earthq2clusters <- kmeans(dades, 2)
+set.seed(1)
+earthq3clusters <- kmeans(dades, 3)
+set.seed(1)
+earthq4clusters <- kmeans(dades, 4)
+set.seed(1)
+earthq5clusters <- kmeans(dades, 5)
+
+par(mfrow = c(1,2))
+plot(dades[c(4,7)], col = earthq2clusters$cluster, main = "k-means per k = 2", xlab = "Magnitud(EQ_PRIMARY)")
+plot(dades[c(4,7)], col = earthq3clusters$cluster, main = "k-means per k = 3", xlab = "Magnitud(EQ_PRIMARY)")
+
+par(mfrow = c(1,2))
+plot(dades[c(4,7)], col = earthq4clusters$cluster, main = "k-means per k = 4", xlab = "Magnitud(EQ_PRIMARY)")
+plot(dades[c(4,7)], col = earthq5clusters$cluster, main = "k-means per k = 5", xlab = "Magnitud(EQ_PRIMARY)")
+```
+
+Podem observar que la millor agrupació és per `k = 2`, per `k = 3` també es poden veure agrupacions, però es comencen a barrejar i per `k` superior a 3 no obtenim clústers diferenciats, al contrari els punts es barregen.
+
+Provem altres combinacions amb altres variables.Per exemple morts vs profunditat:
+```{r}
+par(mfrow = c(1,2))
+plot(dades[c(3,7)], col = earthq2clusters$cluster, main = "Morts vs Profunditat (k = 2)")
+plot(dades[c(3,7)], col = earthq3clusters$cluster, main = "Morts vs Profunditat (k = 3)")
+```
+
+Obtenim uns resultats molt semblants als anteriors, per `k = 2` veiem dos clústers, encara que amb alguns punts sobreposats i per `k = 3` els punts estan més barrejats.
+
+Considerem la descripció de morts i danys vs la magnitud i aquest cop fem la visualització per *`k = 2`*, que és la visualització que farem a partir d'ara, ja que per `k = 3` els punt surten barrejats.
+```{r}
+par(mfrow = c(1,2))
+plot(dades[c(4,8)], col = earthq2clusters$cluster, main = "Descripció morts vs Magnitud", xlab = "Magnitud(EQ_PRIMARY)")
+plot(dades[c(4,9)], col = earthq2clusters$cluster, main = "Descripció danys vs Magnitud", xlab = "Magnitud(EQ_PRIMARY)")
+```
+
+En aquest cas es fa difícil apreciar res. Podem justificar-ho dient que tant la descripció de morts com de danys és una divisió poc objectiva, en el sentit que s'ha dividit d'una manera arbitrària i per tant no es presta a una distinció clara.
+
+Continuem amb la visualització de tsunami i profunditat vs magnitud:
+```{r}
+par(mfrow = c(1,2))
+plot(dades[c(4,1)], col = earthq2clusters$cluster, main = "Tsunami vs Magnitud", xlab = "Magnitud(EQ_PRIMARY)")
+plot(dades[c(7,1)], col = earthq2clusters$cluster, main = "Tsunami vs Morts")
+```
+
+La darrera gràfica no ens diu res, la primera segueix la dinàmica de les anteriors. De totes maneres anem veient que la millor separació és per `k = 2`.
+
+Si considerem la longitud i la latitud vs la magnitud:
+```{r}
+par(mfrow = c(1,2))
+plot(dades[c(4,5)], col = earthq2clusters$cluster, main = "Latitud vs Magnitud", xlab = "Magnitud(EQ_PRIMARY)")
+plot(dades[c(4,6)], col = earthq2clusters$cluster, main = "Longitud vs Magnitud", xlab = "Magnitud(EQ_PRIMARY)")
+```
+
+Novament no obtenim cap classificació.
+
+Podem inspeccionar la relació amb les morts, que és la variable que potser ens pot funcionar per la classificació.
+```{r}
+par(mfrow = c(1,2))
+plot(dades[c(7,5)], col = earthq2clusters$cluster, main = "Latitud vs Morts")
+plot(dades[c(7,6)], col = earthq2clusters$cluster, main = "Longitud vs Morts")
+```
+
+Podem provar ara amb longitud vs latitud i tsunami vs profunditat:
+```{r}
+par(mfrow = c(1,2))
+plot(dades[c(4,3)], col = earthq2clusters$cluster, main = "Profunditat vs Magnitud", xlab = "Magnitud(EQ_PRIMARY)")
+plot(dades[c(3,1)], col = earthq2clusters$cluster, main = "Tsunami vs Profunditat")
+```
+
+## Primeres conclusions
+
+Com a resum, hem vist que el nombre òptim de clústers era possiblement `k = 3`, però després de visualitzar varies combinacions de variables s'observa que per aquest valor de `k` els punts surten massa barrejats. En canvi per `k = 2`, valor que ens ha donat el criteri de la silueta mitja, sembla ser el que descriu millor els clústers. 
+
+Observem que les variables que més bé mostren els clusters són la magnitud, la profunditat, el nombre de morts i també el fet que hi hagi tsunami o no. Per les altres variables, com longitud i latitud i en especial les descripcions de morts i danys no obtenim resultats apreciables.
+Una possible explicació dels resultats obtinguts és que les dades de les que disposem han estat sotmeses a una neteja exhaustiva, juntament amb la presència de gran varietat de països on els efectes dels terretrèmols de característiques semblants, poden ser molt diferents. Òbviament una de les altres explicacions, com ja comentat, és la diferència de densitat de població.
+
+
+*************
+# Exercici 2
+*************
+
+## Model no supervisat anterior, però usant una mètrica de distància diferent.
+
+Considerem ara el mateix model que acabem d'estudiar, però usant una mètrica diferent a la mètrica euclidiana que fa servir per defecte l'algoritme kmeans.
+
+La mètrica que farem servir és la distància Manhattan.
+```{r}
+library(factoextra)
+library(NbClust)
+set.seed(123)
+res.nb <- NbClust(dades, distance = "manhattan",
+                  min.nc = 2, max.nc = 10, 
+                  method = "complete", index ="gap") 
+res.nb$Best.nc # print the results
+
+fviz_nbclust(dades, kmeans, method = "wss", k.max = 10, 
+             diss = get_dist(dades, method = "manhattan"), nstart = 50)
+
+fviz_nbclust(dades, kmeans, method = "silhouette", k.max = 10, 
+             diss = get_dist(dades, method = "manhattan"), nstart = 50)
+
+```
+
+Podem observar que el nombre de clusters segueix essent semblant al que hem determinat, és a dir `k = 2` o `k = 3` segons les gràfiques anteriors.
+
+
+Per veure com s'agrupen els clústers fem servir la funció `dist()` on indiquem que fem servir la distància Manhattan i la funció `pam()`, (*Partitioning Around Medoids*).
+```{r}
+dist_matrix <- dist(dades, method = "manhattan")
+pam_2 <- pam(dist_matrix, k = 2)
+pam_3 <- pam(dist_matrix, k = 3)
+cluster2 <- pam_2$clustering
+cluster3 <- pam_3$clustering
+
+par(mfrow = c(1,2))
+plot(dades[c(4,7)], col = cluster2, main = "Morts vs Magnitud (k = 2)", xlab = "Magnitud(EQ_PRIMARY)")
+plot(dades[c(4,7)], col = cluster3, main = "Morts vs Magnitud (k = 3)", xlab = "Magnitud(EQ_PRIMARY)")
+
+par(mfrow = c(1,2))
+plot(dades[c(3,7)], col = cluster2, main = "Morts vs Profunditat (k = 2)")
+plot(dades[c(3,7)], col = cluster3, main = "Morts vs Profunditat (k = 3)")
+
+par(mfrow = c(1,2))
+plot(dades[c(4,3)], col = cluster2, main = "Profunditat vs Magnitud", xlab = "Magnitud(EQ_PRIMARY)")
+plot(dades[c(3,1)], col = cluster2, main = "Tsunami vs Profunditat")
+
+par(mfrow = c(1,2))
+plot(dades[c(4,1)], col = cluster2, main = "Tsunami vs Magnitud", xlab = "Magnitud(EQ_PRIMARY)")
+plot(dades[c(7,1)], col = cluster2, main = "Tsunami vs Morts")
+
+par(mfrow = c(1,2))
+plot(dades[c(7,5)], col = cluster2, main = "Latitud vs Morts")
+plot(dades[c(7,6)], col = cluster2, main = "Longitud vs Morts")
+```
+
+## Comparació dels dos models no supervisats amb mètriques de distància diferents.
+
+Les visualitzacions són molt semblants, hi pot haver alguna lleugera diferència però no és significativa. Fins i tot si ho provem amb la distància del màxim obtenim resultats semblants. 
+
+## Conclusions.
+
+Hem fet una nova visualització usant la distància de Manhattan, hem començat amb valors de `k = 2, 3` i hem acabat amb valors de 2 per la mateixa raó que en el cas del primer exercici, els punts es barrgen com es poden veure a les gràfiques. S'observa que els clústers són gairebé iguals. Això podria ser degut a la robustesa de les dades o bé simplement podem dir que les diferències no són significatives al fer la comparació amb les diferents mètriques. Personalment m'inclinaria per aquesta darrera, sense entrar en més detall.
+
+*************
+# Exercici 3
+*************
+
+## Algorismes DBSCAN i OPTICS
+
+Treballem ara els algoritmes DBSCAN i OPTICS on el paràmetre de entrada més rellevant és `minPts` que defineix la mínima densitat de punts acceptada al voltant d’un centroide i també tenim el paràmetre `eps`, (per DBSCAN), que ens indica el radi respecte els veïns a considerar.
+
+Carreguem la llibreria.
+```{r}
+library('dbscan')
+summary(dades)
+```
+
+
+Mitjançant les funcions `optics` i `extractDBSCAN` provarem diferents valors per `eps` i `minPts` i ho visualitzarem amb diagrames d’accessibilitat o *reachability plot*, (visualització de la distància d’accessibilitat de cada punt). Les valls representen clústers (com més profund és la vall, més dens és el clúster), mentre que els cims indiquen els punts que estan entre les agrupacions.
+
+## Resultats amb diferents valors d'`eps` i `minPts`.
+
+Comencem considerant diferents valors de `eps` i `minPts = 5`:
+```{r}
+set.seed(123)
+# OPTICS
+optics_res = optics(dades, minPts = 5)
+
+# Clústers amb DBSCAN con el valor actual de eps
+dbscan_res = extractDBSCAN(optics_res, eps_cl = 0.2)
+plot(dbscan_res, main = "minPts = 5,  eps = 0.2")
+
+dbscan_res = extractDBSCAN(optics_res, eps_cl = 0.5)
+plot(dbscan_res, main = "minPts = 5,  eps = 0.5")
+
+dbscan_res = extractDBSCAN(optics_res, eps_cl = 1.2)
+plot(dbscan_res, main = "minPts = 5,  eps = 1")
+```
+
+Fem el mateix per `minPts = 10`:
+```{r}
+set.seed(123)
+# OPTICS
+optics_res = optics(dades, minPts = 10)
+
+# Clústers amb DBSCAN con el valor actual de eps
+dbscan_res = extractDBSCAN(optics_res, eps_cl = 0.2)
+plot(dbscan_res, main = "minPts = 5,  eps = 0.2")
+
+dbscan_res = extractDBSCAN(optics_res, eps_cl = 0.5)
+plot(dbscan_res, main = "minPts = 5,  eps = 0.5")
+
+dbscan_res = extractDBSCAN(optics_res, eps_cl = 1.2)
+plot(dbscan_res, main = "minPts = 10,  eps = 1.2")
+```
+
+Podem fer-ho també per `minPts = 15` i obtenim resultats semblants.  
+
+Donem per bo els valors que ens donen 2 clústers. Els podem visualitzar representant les gràfiques que hem fet amb kmeans. Considerem el cas `minPts = 10` i `eps = 0.5`:
+```{r}
+set.seed(123)
+# OPTICS
+optics_res = optics(dades, minPts = 10)
+dbscan_res = extractDBSCAN(optics_res, eps_cl = 0.5)
+
+par(mfrow = c(1,2))
+hullplot(dades[c(4,7)], dbscan_res, main = "Morts vs Magnitud", xlab = "Magnitud(EQ_PRIMARY)")
+hullplot(dades[c(3,7)], dbscan_res, main = "Morts vs Profunditat")
+
+par(mfrow = c(1,2))
+hullplot(dades[c(4,3)], dbscan_res, main = "Profunditat vs Magnitud", xlab = "Magnitud(EQ_PRIMARY)")
+hullplot(dades[c(3,1)], dbscan_res, main = "Tsunami vs Profunditat")
+
+par(mfrow = c(1,2))
+hullplot(dades[c(4,1)], dbscan_res, main = "Tsunami vs Magnitud", xlab = "Magnitud(EQ_PRIMARY)")
+hullplot(dades[c(7,1)], dbscan_res, main = "Tsunami vs Morts")
+
+par(mfrow = c(1,2))
+hullplot(dades[c(7,5)], dbscan_res, main = "Latitud vs Morts")
+hullplot(dades[c(7,6)], dbscan_res, main = "Longitud vs Morts")
+```
+
+## Conclusions
+
+Hem vist que per un `eps` al voltant de 0.5 i fins a gairebé 1 obtenim 2 clústers, que és el resultat que hem obtingut amb kmeans. S'observa també que  hi ha poques variacions amb `minPts` de 5 a 15.
+
+Els resultats de les agrupacions però no són molt correctes ja que hi ha representacions en les quals s'obtenen clústers superposats. De fet aquests resultats són molt semblants als que hem trobat amb kmeans, és a dir, 2 clústers però no ben definits, amb superposicions en els dos casos estudiats fins ara.  
+Probablement i com ja hem comentat, per exemple, tenim terratrèmols de característiques diferents que provoquen els mateixos danys personals i materials. I de la mateixa manera, tenim terratrèmols amb característiques iguals que provoquen danys materials i humans molt diferents.
+
+
+*************
+# Exercici 4
+*************
+
+## Model supervisat i dades
+
+Ara volem plantejar el nostre problema des d'un punt de vista supervisat. El que farem serà escollir una variable objectiu i mirar com es comporta el model amb les dades d'entrenament i test.  
+
+La primera cosa que hem de fer és triar la **variable objectiu**. Podrem pensar amb la magnitud, la profunditat, però ja que disposem de la variable **DEATHS_DESCRIPTION**, que és una variable discretitzada que conté 4 nivells de danys humans, en decantem per aquesta.  
+
+Una altra cosa que podem fer és fer una discretització de la profunditat i la magnitud segons:  
+
+  * **FOCAL_DEPTH** (segons la divisió [USGS](https://www.usgs.gov/programs/earthquake-hazards/determining-depth-earthquake)):  
+    * **Shallow** (superficials): de 0 a 70 km.
+    * **Intermediate** (intermedis): de 70 km a 300 km.
+    * **Deep** (profunds): de 300 km a 700 km.
+ 
+```{r}
+#dades_netes$DEPTH <- cut(dades_netes$FOCAL_DEPTH, breaks = c(-1, 70, 300, 700), labels = c("Shallow", "Intermediate", "Deep"))
+```
+
+  * **EQ_PRIMARY** (segons la divisió adaptada [UAF] (http://earthquake.alaska.edu/earthquake-magnitude-classes)):  
+    * **Minor**: fins a magnitud 3.9.
+    * **Light**: de 4 a 4.9.
+    * **Moderate**: de 5 a 5.9.
+    * **Strong**: de 6 a 6.9.
+    * **Great**: magnitud 7 o més.
+
+```{r}
+#dades_netes$EQ_MAG_CLASS <- cut(dades_netes$EQ_PRIMARY, breaks = c(0, 4, 5, 6, 7, 10), labels = c("Minor", "Light", "Moderate", "Strong", "Great"))
+```
+
+Però després de fer proves i visualitzacions d'arbres ens decantem per deixar-les tal qual, sense discretitzar, el resultats que obtenim fan ús de les característiques pròpies dels terratrèmols.
+
+Primer de tot, eliminem la variable YEAR (considerem que és una variable que no és significativa de l'activitat sísmica, a més després de l'exhaustiva neteja realitzada pot donar resultats inesperats).  
+Tampoc tindrem en compte la variable DEATHS ja que la nostra variable objectiu és DEATHS_DESCRIPTION.  
+
+Un cop dit això, el que farem és crear dos models, un tenint en compte totes les variables i l'altre descartant més variables per tal de simplificar. Amb aquest darrer model seguirem fent els següents exercicis.
+
+Inicialment escollim 7 variables: FLAG_TSUNAMI, FOCAL_DEPTH (profunditat), EQ_PRIMARY (magnitud), LATITUDE, LONGITUDE, DEATHS_DESCRIPTION (variable objectiu) i DAMAGE_DESCRIPTION).  
+
+Després descartarem LATITUD i LONGITUD, ens quedarem amb 4 variables per tal d'obtenir un arbre més simplificat.
+
+
+## Mostres d'entrenament i de prova.
+
+Factoritzem primer les dades que ens interessen:
+```{r}
+cols <- c(2, 9, 10, 21, 22, 25, 31)
+dades <- as.data.frame(dades_netes[cols])
+factor_vars = c("FLAG_TSUNAMI", "DEATHS_DESCRIPTION", "DAMAGE_DESCRIPTION")
+dades[factor_vars] <- lapply(dades[factor_vars], factor)
+```
+
+Considerem les dades per crear un primer model amb 6 variables i després un altre amb 4 variables, (sense latitud i longitud).
+```{r}
+#cols <- c(1, 5, 6, 9, 10, 11)
+
+# Arbre 1
+cols <- c(1, 2, 3, 4, 5, 7)
+dades_tree_1 <- dades[cols]
+
+# Arbre 2
+cols <- c(1, 2, 3, 7)
+dades_tree_2 <- dades[cols]
+```
+
+Volem dividir el conjunt de dades en un conjunt d’entrenament i un conjunt de prova. El conjunt d’entrenament és el subconjunt del conjunt original de dades utilitzat per a construir un primer model; i el conjunt de prova, el subconjunt del conjunt original de dades utilitzat per a avaluar la qualitat del model.  
+
+Dividim aquest subconjunts segons la proporció més usual, 2/3 per al conjunt d’entrenament i 1/3, per al conjunt de prova.  
+
+La variable objectiu per la qual classificarem és, com hem dit és DEATHS_DESCRIPTION, (columna 8 del dataset). D’aquesta forma, tindrem un conjunt de dades per a l’entrenament i un per a la validació.
+
+Considerem el primer arbre i definim les dades amb les que treballarem, (afegim seed() per la reproductibilitat).
+```{r}
+set.seed(666)
+y <- dades[,6] 
+X_1 <- dades_tree_1
+```
+
+De manera dinàmica podem definir una manera de separar les dades en funció d’un paràmetre, en aquest cas del “split_prop”. Definim un paràmetre que controla el split de manera dinàmica en el test.
+```{r}
+split_prop <- 3 
+indexes <- sample(1:nrow(dades), size = floor(((split_prop - 1) / split_prop) * nrow(dades)))
+trainX_1 <- X_1[indexes,]
+trainy_1 <- y[indexes]
+testX_1 <- X_1[-indexes,]
+testy_1 <- y[-indexes]
+```
+
+Després d’una extracció aleatòria de casos és altament recomanable efectuar una anàlisi de dades mínim per a assegurar-nos de no obtenir classificadors esbiaixats pels valors que conté cada mostra. En aquest cas, verificarem que la proporció de risc és semblant en els dos conjunts:
+```{r}
+summary(trainX_1)
+summary(trainy_1)
+
+summary(testX_1)
+summary(testy_1)
+```
+
+Efectivament s’observa que la proporció és semblant (564/269, 44/30, 85/43, 65/37).
+
+Alternativament, si considerem l'arbre 2, obtenim el següent:
+```{r}
+set.seed(666)
+X_2 <- dades_tree_2
+
+split_prop <- 3 
+indexes <- sample(1:nrow(dades), size = floor(((split_prop - 1) / split_prop) * nrow(dades)))
+trainX_2 <- X_2[indexes,]
+trainy_2 <- y[indexes]
+testX_2 <- X_2[-indexes,]
+testy_2 <- y[-indexes]
+
+summary(trainX_2)
+summary(trainy_2)
+
+summary(testX_2)
+summary(testy_2)
+```
+
+Obtenim les mateixes proporcions anteriors, (hem triat la mateixa reproductibilitat).
+
+*************
+# Exercici 5
+*************
+
+## Creació del model i visualització de l’arbre.
+
+Creem l’arbre de decisió usant les dades d’entrenament (cal no oblidar que la variable *outcome* és de tipus factor):
+```{r message=FALSE}
+library(C50)
+library(grid)
+library(gridExtra)
+```
+
+```{r}
+trainy_1 = as.factor(trainy_1)
+model_1 <- C50::C5.0(trainX_1, trainy_1)
+plot(model_1, gp = gpar(fontsize = 8))
+```
+
+Com es pot observar, aquest arbre és il·legible. I en canvi ara considerem l'**arbre 2** que hem definit més amut i on hem eliminat les variables LATITUD i LONGITUD, tenim el següent:
+```{r}
+trainy_2 = as.factor(trainy_2)
+model_2 <- C50::C5.0(trainX_2, trainy_2)
+plot(model_2, gp = gpar(fontsize = 8))
+```
+
+Aquest darrer arbre s'ha simplificat considerablement. Observem que s'usen simplement les variables que defineixen intrinsecament els terratrèmols.  
+Falta veure ara les característiques i la qualitat.
+
+## Extracció de les regles, comentaris i interpretacions.
+
+Volem analitzar i comentar les dades que podem treure del **primer arbre** que hem obtingut, un resum del **model 1**, (en el qual tenim encara les variables de longitud i latitud:
+```{r}
+model_1 <- C50::C5.0(trainX_1, trainy_1, rules = TRUE )
+summary(model_1)
+```
+
+Obtenim 18 regles, (que es poden llegir en el resum anterior i no reproduïm aquí), i s’observa que el número i percentatge de casos mal classificats en el subconjunt d’entrenament, on hi posa Errors, veiem que es classifiquen erròniament 130 dels 758 casos donats, una taxa d’error del 17.2%.
+
+Si ara fem el mateix per l'**arbre 2** (sense lat. i long.):
+```{r}
+model_2 <- C50::C5.0(trainX_2, trainy_2, rules = TRUE )
+summary(model_2)
+```
+
+S’observa que el número i percentatge de casos mal classificats en el subconjunt d’entrenament, on hi posa Errors, veiem que es classifiquen erròniament 167 dels 758 casos donats, una taxa d’error del 22.0%.
+
+Les regles que observem són les següents:
+
+  * Regla 1:  
+    * Cobreix 491 casos i d’aquests 75 no pertanyen a la classe predita.
+    * Els terratrèmols que tenen una magnitud  menor o igual a 6.7 es classifiquen com a Class = 1. Amb una validesa del 84.6%.
+
+  * Regla 2:  
+    * Cobreix 577 casos i d’aquests 89 no pertanyen a la classe predita.
+    * Els terratrèmols que provoquen uns danys que estàn en els grups 1, 2, 3 es classifiquen com a Class = 1. Amb una validesa del 84.5%.
+
+  * Regla 3:  
+    * Cobreix 127 casos i d’aquests 27 no pertanyen a la classe predita.
+    * Els terratrèmols que tenen profunditat superior a 47 km, es classifiquen com a Class = 1, good. Amb una validesa del 79.8%.
+
+  * Regla 4:  
+    * Cobreix 73 casos i d’aquests 33 no pertanyen a la classe predita.
+    * Els terratrèmols que tenen una profunditat <= 43, una magnitud > 6.7 i uns danys materials = 4, es classifiquen com a Class = 4. Amb una validesa del 54.7%.
+
+## Qualitat del model
+
+Pel **primer arbre**, com hem dit el número i percentatge de casos mal classificats en el subconjunt d’entrenament, veiem que es classifiquen erròniament 130 dels 758 casos donats, una taxa d’error del 17.2%.  
+Observem tenim 551 registres ben classificats de la classe 1 i 36, 51 i 20 que han de ser de class 1 i s'han classificat a altres classes. També tenim 7 registres ben classificats de classe2, 32 de classe 3 i també tenim 38 registres ben classificats de class 4 i 4, 1 i 1 mal classificats.  
+
+Pel **segon arbre**, el número i percentatge de casos mal classificats en el subconjunt d’entrenament, veiem que es classifiquen erròniament 167 dels 758 casos donats, una taxa d’error del 22.0%.  
+Observem tenim 551 registres ben classificats de la classe 1 i 40 registres ben classificats de class 4. En canvi no obtenim cap classificació de les classes 2 i 3.
+
+
+## Generació la matriu de confusió per a mesurar la capacitat predictiva de l'algoritme, tenint en compte les diferents mètriques associades a aquesta matriu (precisió, sensibilitat, especificitat).
+
+Tot seguit realitzarem una anàlisi de la bondat d’ajust sobre el conjunt de test amb matriu de confusió, on veurem d'una forma gràfica com de bé o malament ha funcionat el model.  
+Un bon model serà el que té valors grans a la diagonal principal i propers a zero a la resta de posicions de la matriu. Dins la matriu de confusió, considerem els termes de *Sensibilitat* (quantifica la proporció de mostres positives que són classificades com a positives) i l'*Especificitat* (quantifica la proporció de mostres negatives que són classificades com a negatives).
+
+
+Considerem el **primer arbre**:
+```{r}
+predicted_model_1 <- predict( model_1, testX_1, type="class" )
+print(sprintf("La precisió de l'arbre 1 es: %.4f %%", 100 * sum(predicted_model_1 == testy_1) / length(predicted_model_1)))
+```
+
+Per analitzar la matriu de confusió, utilitzarem la funció `CrossTable` del paquet *gmodels*.
+```{r}
+library(gmodels)
+
+CrossTable(testy_1, predicted_model_1, prop.chisq  = FALSE, prop.c = FALSE, prop.r = FALSE, dnn = c('Reality', 'Prediction'))
+```
+
+Per obtenir l’especifitat i la sensibilitat, farem ús de la funció `confusionMatrix()` de la llibreria *caret*.
+```{r message=FALSE}
+library(caret)
+
+confusionMatrix(data = predicted_model_1, reference = testy_1, positive = "1")
+```
+
+Fem el mateix pel **segon arbre**, (sense lat. i long.):
+```{r}
+predicted_model_2 <- predict( model_2, testX_2, type="class" )
+print(sprintf("La precisió de l'arbre 2 es: %.4f %%", 100 * sum(predicted_model_2 == testy_2) / length(predicted_model_2)))
+```
+
+```{r}
+CrossTable(testy_2, predicted_model_2, prop.chisq  = FALSE, prop.c = FALSE, prop.r = FALSE, dnn = c('Reality', 'Prediction'))
+```
+
+L’especifitat i la sensibilitat:
+```{r}
+confusionMatrix(data = predicted_model_2, reference = testy_2, positive = "1")
+```
+
+### Comparació i interpretació dels resultats, avaluació la taxa d'error de l'arbre generat, l'eficiència a la classificació
+
+A continuació, analitzem els resultats obtinguts pera cadascun dels models, (dels dos arbres anteriors):
+
+**Model 1**, (amb les variables de latitud i longitud)
+
+  * Train - Errors: classifica erròneament 130 dels 758 casos donats, una taxa d’error del 17.2%. 
+  * Sensibilitat: 95.17% per la Classe 1,  0.0% per la Classe 2, 6.98% per la Classe 3 i 51.35% per la Classe 4.
+  * Especificitat: 40.00%  per la Classe 1, 99.14% per la Classe 2, 95.83% per la Classe 3 i 94.74 per la Classe 4.
+  * Test - Accuracy: 73.35%
+
+**Model 1**, (sense les variables de latitud i longitud)
+
+  * Train - Errors: classifica erròneament 167 dels 758 casos donats, una taxa d’error del 22.0%. 
+  * Sensibilitat: 97.03% per la Classe 1,  0.0% per la Classe 2, 0.0% per la Classe 3 i 54.05% per la Classe 4.
+  * Especificitat: 32.73%  per la Classe 1, 100% per la Classe 2, 100% per la Classe 3 i 92.98 per la Classe 4.
+  * Test - Accuracy: 74.14%
+
+## Conclusions.
+
+Com es pot veure, els resultats dels dos models considerats, amb o sense les variables de LATITUD i LONGITUD, són comparables. Per un costat la taxa d'error per les dades d'entrenament és lleugerament inferior quan tenim en comte les variables esmentades.  
+La precisió per les dades de test és semblant pels dos arbres.  
+La classificació per la classe 1 és alta, és a dir pels terratrèmols lleus i sense (o amb molt pocs), morts.  
+Per les classes 2 i 3 els dos models són pèssims i per la classe 4 està al voltant del 50%, que ho qualifiquem de dolent.
+
+*************
+# Exercici 6
+*************
+### Es prova amb una variació o un altre enfocament algorítmic.
+
+**Boosting**:
+
+Considerem ara l’adaptative boosting que és una altra característica potent incorporada a C5.0, està basat en el treball de Rob Schapire i Yoav Freund. La idea és generar diversos classificadors (ja siguin arbres de decisió o conjunts de regles) en lloc d’un sol. Cada cop que s’ha de classificar un cas nou, cada classificador vota per la seva classe prevista i els vots es compten per determinar la classe final. (https://www.rulequest.com/see5-unix.html#RULES).
+
+**Nota:** ho farem només per el primer dels models anteriors, el qual hi tenim les variables de latitud i longitud.
+
+```{r}
+model2 <- C50::C5.0(trainX_1, trainy_1, trials = 45)
+#plot(model2, gp = gpar(fontsize = 8))
+```
+
+Novament obtenim un arbre que no és llegible per la seva densitat, per tant no el mostrem. El que sí mostrem són les noves prediccions d'aquest nou arbre. 
+```{r}
+predicted_model2 <- predict( model2, testX_1, type="class" )
+print(sprintf("La precisió de l'arbre és: %.4f %%",
+              100 * sum(predicted_model2 == testy_1) / length(predicted_model2)))
+```
+
+Podem veure que la precisió de l'arbre gairebé és semblant, (ha passat de 73.35% a 72.82%).
+
+Tot seguit inspeccionem la matriu de confusió.
+```{r}
+# Obtenció de la sensibilitat i especificitat
+confusionMatrix(data = predicted_model2, reference = testy_1, 
+                positive = "1")
+```
+
+S'observa que ha disminuït la sensibilitat respecte la classe 1, però ha augmentat llugerament la de la classe 3, (11.63%).
+
+**Cart**
+
+Considerem ara arbres de decisions generats per l’algoritme CART (Classification And Regression Trees) mitjançant la funció `rpart()`.
+
+Aquesta funció implementa arbres de classificació utilitzant un punt de vista de partició recursiva que divideix el conjunt de dades en subconjunts homogenis, basats en els valors de les variables predictores. Aquest subconjunts es representen amb nodes en un arbre, on els nodes terminals contenen les prediccions basades en la majoria o el promig de les observacions d’aquest subconjunt.
+
+Les regles de decisió generades per el model CART, generalment es visualitzen com un arbre binari.
+
+```{r}
+if(!require(rpart)){
+  install.packages('rpart', repos='http://cran.us.r-project.org')
+  library(rpart)
+}
+if (!require('rpart.plot')) install.packages('rpart.plot')
+library('rpart.plot')
+
+set.seed(123)
+# Model rpart
+model_rpart <- rpart(dades$DEATHS_DESCRIPTION ~ FLAG_TSUNAMI + FOCAL_DEPTH + EQ_PRIMARY + 
+                               LATITUDE + LONGITUDE + DAMAGE_DESCRIPTION, 
+                     data = dades_tree_1, 
+                     method = "class")
+
+# Plot rpart
+rpart.plot(model_rpart, type = 4, extra = 102)
+```
+
+```{r}
+set.seed(123)
+# Model rpart
+predicted_rpart <- predict(model_rpart, testX_1, type = "class")
+
+print(sprintf("Model rpart: La precisió de l'arbre és: %.4f %%",
+              100 * sum(predicted_rpart == testy_2) / length(predicted_rpart)))
+```
+
+```{r}
+# Obtenció de la sensibilitat i especificitat
+confusionMatrix(data = predicted_rpart, reference = testy_1, 
+                positive = "1")
+```
+
+En aquest cas, la precisió de l'arbre ha augmental lleugerament, de 73.35% a 74.67%.
+
+En quant a la sensibilitat, ha augmentat per la classe 1 i la classe 4. Però per les classes 2 i 3 seguim amb classificació zero.
+
+
+*************
+# Exercici 7
+*************
+
+## Possibles limitacions tenen les dades que has seleccionat per obtenir conclusions amb els models (supervisat i no supervisat)
+
+Hem fet un estudi dels terratrèmols arreu del món considerant un conjunt de dades altament incomplet, degut bàsicament a que els registres que conté el dataset van del 2150 BC fins a l’actualitat i les dades anteriors a l'existència d'aperells d'enregistrament d'activitat sísmica s'han descartat. De fet s'han descartat les dades anteriors al 1900 i algunes de les posteriors per incompletesa.
+Aquesta neteja exhaustiva ha pogut influir als resultats que hem obtingut.
+
+Hi ha una característica comuna que hem obtingut en els dos models estudiats, el no supervisat i el supervisat.  
+
+A la primera part, model no supervisat hem obtingut els millors resultats amb 2 clústers. En la segona part hem considerat una variable objectiu (DEATHS_DESCRIPTION) que engloba 4 graus de danys humans. Hem obtingut una classificació dels terratrèmols segons aquesta variable, en la qual bàsicament només diferenciava la Classe 1 amb bons resultats i la Classe 4 amb més mal resultat.  
+En canvi per la classe 2 i 3 no ens ha funcionat. És a dir, el nostre model no supervisat ha identificat 2 clústers i el model supervisat ha identificat 2 classes.
+
+## Possibles riscos de fer servir el model.
+
+És evident que el model no funciona, pels resultats obtinguts. Ara bé, el fet de la falta de classificació de les classes 2 i 3 és un indicatiu de que primer, la divisió de danys humans potser no és la més correcta en el sentit que potser es podria fer una classificació més ample entre les classe 2, 3 i 4.
+
+Per altra part tenim la falta d'informació de la densitat de població. Aquest fet pot introduir un soroll que afecta a la classificació ja que per exemple, terratrèmols que potser es classificarien com a classe 4 van a parar a altres classes inferiors.  
+
+Un altre fet, des del meu punt de vista, *clau* en la mala classificació dels grups 2 i 3, és que tenim una barreja de països de diferents nivells de preparació o prevenció de terratrèmols i per tant amb conseqüències molt variades. És a dir, tenim terratrèmols amb les mateixes característiques intrínseques però amb clasificació de danys humans molt variat. De la mateixa manera, tenim terratrèmols amb característiques molt diferents, (e.g. magnitud), amb danys humans molt semblant, que correspondrien a la mateixa classe.
+
+Això ens porta finalment a preguntar-nos si aquest model podria funcionar si, en comptes de considerar terratrèmols globals, consideressim terratrèmols per diferents països  o regions. En aquest cas potser es minimitzarien les diferèncias o les influències que fan que tinguem aquesta mala classificació en el nostre cas estudiat.
